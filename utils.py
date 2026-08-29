@@ -196,10 +196,14 @@ def enderezar_tira(crop_bgr, rect):
     ch, cw = crop_bgr.shape[:2]
     rot = cv2.warpAffine(crop_bgr, M, (cw, ch), borderValue=(255, 255, 255))
     pad = int(0.45 * w)
+    # Padding vertical: el minAreaRect solo cubre la parte saturada; los
+    # cuadros finales (NIT/LEU) suelen ser casi blancos y quedan fuera del
+    # rect. Se extiende la banda ~35% arriba y abajo para no perderlos.
+    pad_y = int(0.35 * h)
     bx0 = max(0, int(cx - w / 2) - pad)
     bx1 = min(cw, int(cx + w / 2) + pad)
-    by0 = max(0, int(cy - h / 2))
-    by1 = min(ch, int(cy + h / 2))
+    by0 = max(0, int(cy - h / 2) - pad_y)
+    by1 = min(ch, int(cy + h / 2) + pad_y)
     banda = rot[by0:by1, bx0:bx1]
     return banda, M, (bx0, by0), w
 
@@ -266,7 +270,9 @@ def _rejilla_cuadros(prof, y0, y1, paso, n):
                           prominence=(seg.max() * 0.22))
     valles = np.array([y0 + p for p in picos], float)
 
-    # paso fino a partir de los valles (que pueden saltar cuadros)
+    # Paso fino a partir de los valles observados (que pueden saltar
+    # cuadros pálidos sin valle). El paso es físicamente constante, así que
+    # esta es la magnitud confiable para proyectar TODOS los cuadros.
     if len(valles) >= 2:
         d = np.diff(valles)
         mult = np.round(d / paso)
@@ -275,19 +281,22 @@ def _rejilla_cuadros(prof, y0, y1, paso, n):
     else:
         paso_f = float(paso)
 
-    # fase b0 que mejor alinea la rejilla con los valles observados
-    mejor, best_b0 = 1e18, y0
+    # Fase b0 (primer borde) alineada solo a los valles observados. NO se
+    # ata el último borde a y1: los cuadros finales (NIT/LEU) suelen ser
+    # casi blancos y y1 se queda corto; forzar el cierre ahí comprime la
+    # rejilla y encima los últimos cuadros. El paso constante manda.
+    mejor, best_b0 = 1e18, float(y0)
     for b0 in np.arange(y0 - paso_f * 0.5, y0 + paso_f * 0.5, 2):
         bordes = np.array([b0 + paso_f * i for i in range(n + 1)])
         if len(valles) > 0:
-            costo = sum(np.min(np.abs(valles - b)) for b in bordes)
+            # cada valle debe caer cerca de ALGÚN borde de la rejilla
+            costo = sum(np.min(np.abs(bordes - v)) for v in valles)
         else:
-            costo = abs(b0 - y0) + abs((b0 + paso_f * n) - y1)
-        costo += 0.3 * abs((b0 + paso_f * n) - y1)
+            costo = abs(b0 - y0)
         if costo < mejor:
             mejor, best_b0 = costo, b0
 
-    bordes = [int(best_b0 + paso_f * i) for i in range(n + 1)]
+    bordes = [int(round(best_b0 + paso_f * i)) for i in range(n + 1)]
     centros = [(bordes[i] + bordes[i + 1]) // 2 for i in range(n)]
     return centros, bordes
 
