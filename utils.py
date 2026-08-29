@@ -261,43 +261,79 @@ def _paso_autocorr(prof, y0, y1, n):
 
 
 def _rejilla_cuadros(prof, y0, y1, paso, n):
-    """Ubica los n cuadros combinando valles observados (separaciones) con
-    una rejilla regular de paso fijo (garantiza exactamente n cuadros)."""
+    """Ubica los n cuadros con paso fijo, anclando el cuadro 0 al PRIMER
+    pico de saturación (primer cuadro real, aunque sea pálido).
+
+    Anclar por el primer pico —no por la máxima energía global— evita que
+    la rejilla se desplace hacia los cuadros más saturados del centro de la
+    tira y deje fuera el primer cuadro (GLU), que a veces es pálido. El paso
+    es físicamente constante, así que basta un ancla fiable arriba para
+    proyectar los 10.
+    """
     from scipy.signal import find_peaks
-    seg = prof[y0:y1]
-    inv = seg.max() - seg
-    picos, _ = find_peaks(inv, distance=int(paso * 0.6),
-                          prominence=(seg.max() * 0.22))
-    valles = np.array([y0 + p for p in picos], float)
 
-    # Paso fino a partir de los valles observados (que pueden saltar
-    # cuadros pálidos sin valle). El paso es físicamente constante, así que
-    # esta es la magnitud confiable para proyectar TODOS los cuadros.
-    if len(valles) >= 2:
-        d = np.diff(valles)
-        mult = np.round(d / paso)
-        mult[mult < 1] = 1
-        paso_f = float(np.median(d / mult))
+    # Picos de saturación = centros candidatos de cuadro. Se pide una
+    # prominencia mínima ALTA para el ancla: el tramo blanco de la tira bajo
+    # la pinza y los reflejos generan picos débiles (prominencia baja) que no
+    # son cuadros; anclar en ellos corre la rejilla 1-2 posiciones y pierde
+    # el primer cuadro real (GLU).
+    prom_ancla = max(20, prof.max() * 0.30)
+    pk_fuertes, _ = find_peaks(prof, distance=int(paso * 0.6),
+                               prominence=prom_ancla)
+    pk_fuertes = [p for p in pk_fuertes
+                  if y0 - paso * 0.5 <= p <= y1 + paso * 0.5]
+
+    # Picos con prominencia baja: solo para el refinado de fase (no ancla).
+    pk, _ = find_peaks(prof, distance=int(paso * 0.6),
+                       prominence=max(12, prof.max() * 0.10))
+    pk = [p for p in pk if y0 - paso * 0.5 <= p <= y1 + paso * 0.5]
+
+    # El paso viene por autocorrelación (físicamente constante ~190px); NO
+    # se recalcula desde los picos, que pueden incluir espurios y comprimir
+    # la rejilla.
+    paso_f = float(paso)
+    half = paso_f / 2.0
+
+    # Ancla = primer pico FUERTE (primer cuadro real). Si hay un cuadro
+    # pálido legítimo justo antes (a un paso, con saturación comparable a la
+    # de los cuadros reales), se retrocede para incluirlo; el tramo
+    # blanco/ruido bajo la pinza tiene saturación bastante menor, así que no
+    # arrastra el ancla.
+    if len(pk_fuertes) >= 1:
+        b0 = float(pk_fuertes[0])
+        # nivel de cuadro = mediana de saturación en los picos fuertes; un
+        # cuadro pálido real está cerca de este nivel, el tramo blanco no.
+        nivel = float(np.median([prof[p] for p in pk_fuertes]))
+        umb_cuadro = 0.55 * nivel
+        while b0 - paso_f >= y0:
+            yp = int(round(b0 - paso_f))
+            a = max(0, yp - int(paso_f * 0.2))
+            b = min(len(prof), yp + int(paso_f * 0.2))
+            if b > a and prof[a:b].mean() > umb_cuadro:
+                b0 -= paso_f          # sí hay cuadro antes: incluirlo
+            else:
+                break                 # tramo blanco/ruido: parar
+    elif len(pk) >= 1:
+        b0 = float(pk[0])
     else:
-        paso_f = float(paso)
+        b0 = float(y0) + half
 
-    # Fase b0 (primer borde) alineada solo a los valles observados. NO se
-    # ata el último borde a y1: los cuadros finales (NIT/LEU) suelen ser
-    # casi blancos y y1 se queda corto; forzar el cierre ahí comprime la
-    # rejilla y encima los últimos cuadros. El paso constante manda.
-    mejor, best_b0 = 1e18, float(y0)
-    for b0 in np.arange(y0 - paso_f * 0.5, y0 + paso_f * 0.5, 2):
-        bordes = np.array([b0 + paso_f * i for i in range(n + 1)])
-        if len(valles) > 0:
-            # cada valle debe caer cerca de ALGÚN borde de la rejilla
-            costo = sum(np.min(np.abs(bordes - v)) for v in valles)
-        else:
-            costo = abs(b0 - y0)
-        if costo < mejor:
-            mejor, best_b0 = costo, b0
+    # Refinar la fase alineando la rejilla a TODOS los picos detectados por
+    # mínimos cuadrados de fase (sin desplazar de cuadro): para cada pico se
+    # toma el índice de cuadro más cercano y se ajusta el offset común. Esto
+    # respeta el ancla superior y no se sesga hacia los cuadros más
+    # saturados del centro (que un criterio de energía sí favorecería).
+    if len(pk) >= 3:
+        offs = []
+        for p in pk:
+            i = round((p - b0) / paso_f)      # índice de cuadro para el pico
+            if 0 <= i < n:
+                offs.append(p - (b0 + paso_f * i))
+        if offs:
+            b0 = b0 + float(np.median(offs))
 
-    bordes = [int(round(best_b0 + paso_f * i)) for i in range(n + 1)]
-    centros = [(bordes[i] + bordes[i + 1]) // 2 for i in range(n)]
+    centros = [int(round(b0 + paso_f * i)) for i in range(n)]
+    bordes = [int(round(b0 - half + paso_f * i)) for i in range(n + 1)]
     return centros, bordes
 
 
@@ -317,21 +353,31 @@ def _recentrar_x(S, xc0, yc, r, win_frac=0.9):
     return best
 
 
-def segmentar_cuadros(banda_bgr, s_min, n, radio_frac=0.34):
+def segmentar_cuadros(banda_bgr, s_min, n, radio_frac=0.34,
+                      ancho_min=110, ancho_max=200):
     """Segmenta los n cuadros de la tira enderezada.
 
     Devuelve (centros, r) con centros = lista de (x, y) en coordenadas de la
     banda, en orden físico (arriba->abajo), o None si no se pudo segmentar.
+
+    `ancho_min`/`ancho_max` acotan el ancho estimado de la tira (px) a un
+    rango físico: en escenas de fondo cálido la máscara de saturación se
+    desborda e infla el ancho (y con él el radio), lo que descuadra el
+    arranque de la rejilla; el clamp lo evita.
     """
     S = cv2.cvtColor(banda_bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
     bh, bw = S.shape
 
+    # Ancho de la tira: mediana con umbral MÁS ALTO que el de la máscara,
+    # para medir el núcleo saturado y no el fondo que la máscara sí incluye.
+    s_ancho = s_min + 15
     anchos = []
     for row in S:
-        on = np.where(row > s_min)[0]
+        on = np.where(row > s_ancho)[0]
         if len(on) > 3:
             anchos.append(on[-1] - on[0])
-    ancho = float(np.median(anchos)) if anchos else bw * 0.5
+    ancho = float(np.median(anchos)) if anchos else (ancho_min + ancho_max) / 2
+    ancho = float(np.clip(ancho, ancho_min, ancho_max))
 
     coef0 = _eje_saturacion(S, 0, bh, s_min)
     if coef0 is None:
