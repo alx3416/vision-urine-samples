@@ -20,7 +20,7 @@ import cv2
 import utils
 
 # ============ PARÁMETROS ============
-DATA_DIR = os.path.join("data", "100D3300-PNG")
+DATA_DIR = os.path.join("data", "101D3300-PNG")
 OUTPUT_DIR = os.path.join("output", "samples")
 CSV_NAME = "sample_colors.csv"
 
